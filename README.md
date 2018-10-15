@@ -1,5 +1,7 @@
 # bl
 
+[![CircleCI](https://circleci.com/gh/joshuarubin/bl.svg?style=svg)](https://circleci.com/gh/joshuarubin/bl) [![GoDoc](https://godoc.org/jrubin.io/bl?status.svg)](https://godoc.org/jrubin.io/bl) [![Go Report Card](https://goreportcard.com/badge/jrubin.io/bl)](https://goreportcard.com/report/jrubin.io/bl) [![codecov](https://codecov.io/gh/joshuarubin/bl/branch/master/graph/badge.svg)](https://codecov.io/gh/joshuarubin/bl)
+
 ## Build and Run
 
 Build requires Go `v1.11` or later
