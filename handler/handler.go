@@ -122,6 +122,8 @@ func Handler(workers int) http.Handler {
 
 		ret.APICalls = c.Calls()
 
+		w.Header().Set("Content-Type", "application/json")
+
 		if err = json.NewEncoder(w).Encode(ret); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
