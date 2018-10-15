@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"sync/atomic"
 
 	"golang.org/x/oauth2"
 )
@@ -54,7 +56,7 @@ func New(ctx context.Context, token *oauth2.Token, opts ...Option) Client {
 
 // Calls returns the number of times this Client as made a call to the bitly api
 func (c Client) Calls() int {
-	return c.client.Transport.(*transport).Calls
+	return int(atomic.LoadInt32(&c.client.Transport.(*transport).Calls))
 }
 
 type clientError struct {
@@ -98,7 +100,8 @@ func (c Client) get(ctx context.Context, url string) (*http.Response, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		var buf bytes.Buffer
-		buf.ReadFrom(resp.Body)
+		buf.ReadFrom(resp.Body) // #nosec
+		resp.Body.Close()       // #nosec
 		return nil, clientError{
 			Message: buf.String(),
 			Code:    resp.StatusCode,
@@ -115,6 +118,8 @@ func (c Client) User(ctx context.Context) (*User, error) {
 		return nil, err
 	}
 
+	defer resp.Body.Close()
+
 	var user User
 	if err = json.NewDecoder(resp.Body).Decode(&user); err != nil {
 		return nil, err
@@ -128,7 +133,7 @@ func (c Client) BitlinksByGroup(ctx context.Context, groupGUID string, size, pag
 	url := fmt.Sprintf(
 		"%s/groups/%s/bitlinks?page=%d&size=%d",
 		c.BaseURL,
-		groupGUID,
+		url.PathEscape(groupGUID),
 		page,
 		size,
 	)
@@ -137,6 +142,8 @@ func (c Client) BitlinksByGroup(ctx context.Context, groupGUID string, size, pag
 	if err != nil {
 		return nil, err
 	}
+
+	defer resp.Body.Close()
 
 	var links Links
 	if err = json.NewDecoder(resp.Body).Decode(&links); err != nil {
@@ -152,8 +159,8 @@ func (c Client) MetricsForBitlinkByCountry(ctx context.Context, bitlink string, 
 	url := fmt.Sprintf(
 		"%s/bitlinks/%s/countries?unit=%s&units=%d",
 		c.BaseURL,
-		bitlink,
-		unit,
+		url.PathEscape(bitlink),
+		url.PathEscape(unit),
 		units,
 	)
 
@@ -161,6 +168,8 @@ func (c Client) MetricsForBitlinkByCountry(ctx context.Context, bitlink string, 
 	if err != nil {
 		return nil, err
 	}
+
+	defer resp.Body.Close()
 
 	var metrics Metrics
 	if err = json.NewDecoder(resp.Body).Decode(&metrics); err != nil {

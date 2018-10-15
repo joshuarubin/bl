@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 
 	"jrubin.io/bl/handler"
 	"jrubin.io/bl/selfcert"
@@ -15,6 +16,7 @@ var (
 	addr     = flag.String("addr", ":443", "address:port to listen for requests on")
 	certFile = flag.String("cert", "", "tls certificate file")
 	keyFile  = flag.String("key", "", "tls key file")
+	workers  = flag.Int("workers", 16, "number of worker connections to maintain to the bitly api")
 )
 
 func main() {
@@ -65,7 +67,14 @@ func run() (err error) {
 	defer ln.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle("/v1/clicks/country", handler.Handler())
+	mux.Handle("/v1/clicks/country", handler.Handler(*workers))
+
+	// set up the pprof endpoints
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	server := http.Server{Handler: mux}
 	return server.Serve(ln)
