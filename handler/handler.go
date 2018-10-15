@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -17,16 +15,20 @@ import (
 // Result represents the average number of clicks that all links received from a
 // given country
 type Result struct {
-	Average float32 `json:"average"`
-	Country string  `json:"country"`
+	Link                client.Link `json:"link"`
+	Error               string      `json:"error,omitempty"`
+	Unit                string      `json:"unit"`
+	Units               int         `json:"units"`
+	UnitReference       string      `json:"unit_reference"`
+	AvgClicksPerCountry float32     `json:"avg_clicks_per_country"`
 }
 
 // Results contains the per-country results as well as the total number of links
 // in the default group and the number of calls made to the bitly api
 type Results struct {
-	Total    int      `json:"total"`
-	APICalls int      `json:"api_calls"`
-	Results  []Result `json:"results"`
+	Pagination client.Pagination `json:"pagination"`
+	APICalls   int               `json:"api_calls"`
+	Results    []Result          `json:"results"`
 }
 
 func extractToken(r *http.Request) *oauth2.Token {
@@ -40,7 +42,7 @@ func extractToken(r *http.Request) *oauth2.Token {
 	return &token
 }
 
-const timeout = 1 * time.Minute
+const timeout = 10 * time.Second
 
 // Handler processes a request to provide the average user clicks per country
 // over the last 30 days for a user's default group
@@ -53,6 +55,8 @@ func Handler(workers int) http.Handler {
 			return
 		}
 
+		// parse params
+
 		unit := "day"
 		if u := r.URL.Query().Get("unit"); u != "" {
 			unit = u
@@ -63,89 +67,58 @@ func Handler(workers int) http.Handler {
 			units = int(u)
 		}
 
+		size := 10
+		if s, err := strconv.Atoi(r.URL.Query().Get("size")); err == nil {
+			size = int(s)
+		}
+
+		page := 1
+		if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil {
+			page = int(p)
+		}
+
 		// set an upper limit on request duration
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
 		c := client.New(ctx, token)
 
+		// fetch user info so we can get default group
 		user, err := c.User(ctx)
 		if err != nil {
 			client.Error(w, err)
 			return
 		}
 
-		var wg sync.WaitGroup
-		var processErr error
-		data := map[string]int{}
-		results := processMetrics(data, &processErr, &wg)
+		// get the links in the default group
+		var links *client.Links
+		if links, err = c.BitlinksByGroup(ctx, user.DefaultGroupGUID, size, page); err != nil {
+			client.Error(w, err)
+			return
+		}
 
-		const size = 10
+		ret := Results{Pagination: links.Pagination}
+		ret.Pagination.Prev = ""
+		ret.Pagination.Next = ""
 
 		// prep the worker pool
-		jobs := make(chan string)
+		results := make(chan Result)
+		jobs := make(chan client.Link)
 		for w := 0; w < workers; w++ {
 			go worker(ctx, c, results, unit, units, jobs)
 		}
 
-		var ret Results
-		for page := 1; ; page++ {
-			var links *client.Links
-			if links, err = c.BitlinksByGroup(ctx, user.DefaultGroupGUID, size, page); err != nil {
-				client.Error(w, err)
-				return
-			}
-
-			for _, link := range links.Links {
-				ret.Total++
-				wg.Add(1)
-				jobs <- link.ID
-			}
-
-			if links.Pagination.Next == "" || true {
-				break
-			}
-		}
-
-		close(jobs) // ensure the workers return
-
-		// set up an event that can be monitored for processing completion
-		done := make(chan struct{})
+		// queue all the jobs to fetch link info
 		go func() {
-			wg.Wait()
-			close(results) // ensure the processor func returns
-			close(done)
+			for _, link := range links.Links {
+				jobs <- link
+			}
 		}()
 
-		// wait for either a timeout or processing completion
-		select {
-		case <-ctx.Done():
-			http.Error(w, ctx.Err().Error(), http.StatusGatewayTimeout)
-			return
-		case <-done:
+		for i := 0; i < len(links.Links); i++ {
+			ret.Results = append(ret.Results, <-results)
 		}
-
-		if processErr != nil {
-			client.Error(w, processErr)
-			return
-		}
-
-		// build a sorted list of countries
-		countries := make([]string, 0, len(data))
-		for country := range data {
-			countries = append(countries, country)
-		}
-		sort.Strings(countries)
-
-		// calculate the average clicks
-		ret.Results = make([]Result, 0, len(data))
-		for _, country := range countries {
-			clicks := data[country]
-			ret.Results = append(ret.Results, Result{
-				Average: float32(clicks) / float32(ret.Total),
-				Country: country,
-			})
-		}
+		close(jobs) // ensure the workers return
 
 		ret.APICalls = c.Calls()
 
@@ -155,43 +128,36 @@ func Handler(workers int) http.Handler {
 	})
 }
 
-type metricsOrError struct {
-	Metrics []client.Metric
-	Error   error
+func process(ctx context.Context, c client.Client, unit string, units int, link client.Link) Result {
+	ret := Result{Link: link}
+
+	// every job needs to be processed, if ctx is cancelled, the request
+	// will return an error
+	metrics, err := c.MetricsForBitlinkByCountry(ctx, link.ID, unit, units)
+	if err != nil {
+		ret.Error = err.Error()
+		return ret
+	}
+
+	ret.Unit = metrics.Unit
+	ret.Units = metrics.Units
+	ret.UnitReference = metrics.UnitReference
+
+	var clicks, countries int
+	for _, m := range metrics.Metrics {
+		clicks += m.Clicks
+		countries++
+	}
+
+	if countries > 0 {
+		ret.AvgClicksPerCountry = float32(clicks) / float32(countries)
+	}
+
+	return ret
 }
 
-func processMetrics(data map[string]int, err *error, wg *sync.WaitGroup) chan<- metricsOrError {
-	results := make(chan metricsOrError)
-	go func() {
-		// don't check for context cancellation as workers already do that
-		// all results need to be processed to ensue no leaked worker goroutines
-		for metrics := range results {
-			if metrics.Error != nil {
-				*err = metrics.Error
-				wg.Done()
-				continue
-			}
-
-			for _, metric := range metrics.Metrics {
-				data[metric.Value] += metric.Clicks
-			}
-
-			wg.Done()
-		}
-	}()
-	return results
-}
-
-func worker(ctx context.Context, c client.Client, results chan<- metricsOrError, unit string, units int, jobs <-chan string) {
-	for linkID := range jobs {
-		// every job needs to be processed, if ctx is cancelled, the request
-		// will return an error
-		metrics, err := c.MetricsForBitlinkByCountry(ctx, linkID, unit, units)
-		if err != nil {
-			results <- metricsOrError{Error: err}
-			continue
-		}
-
-		results <- metricsOrError{Metrics: metrics.Metrics}
+func worker(ctx context.Context, c client.Client, results chan<- Result, unit string, units int, jobs <-chan client.Link) {
+	for link := range jobs {
+		results <- process(ctx, c, unit, units, link)
 	}
 }
