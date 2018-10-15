@@ -1,0 +1,23 @@
+---
+version: 2
+
+jobs:
+  build:
+    working_directory: /go/src/jrubin.io/bl
+
+    docker:
+      - image: circleci/golang:latest
+        environment:
+          GO111MODULE: "on"
+
+    steps:
+      - checkout
+      - run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+      - run: bash <(curl -s https://codecov.io/bash) || true
+      - setup_remote_docker
+      - run: docker build -t joshuarubin/bl:latest .
+      - deploy:
+          name: Push images to docker hub
+          command: |
+            docker login -u "${DOCKER_USER}" -p "${DOCKER_PASS}"
+            docker push joshuarubin/bl:latest
