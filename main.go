@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	addr     = flag.String("addr", ":443", "address:port to listen for requests on")
-	certFile = flag.String("cert", "", "tls certificate file")
-	keyFile  = flag.String("key", "", "tls key file")
+	addr     = flag.String("addr", ":https", "address:port to listen for requests on")
+	certFile = flag.String("cert", "", "tls certificate file (optional)")
+	keyFile  = flag.String("key", "", "tls key file (optional)")
 	workers  = flag.Int("workers", 16, "number of worker connections to maintain to the bitly api")
 )
 
@@ -67,6 +67,8 @@ func run() (err error) {
 	defer ln.Close()
 
 	mux := http.NewServeMux()
+
+	// add the primary handler
 	mux.Handle("/v1/clicks/country", handler.Handler(*workers))
 
 	// set up the pprof endpoints
